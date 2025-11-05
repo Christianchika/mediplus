@@ -65,10 +65,13 @@ jobs:
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           
-          # Save to GITHUB_ENV for subsequent steps (multiline safe)
-          echo "TF_VAR_private_key<<EOF" >> $GITHUB_ENV
-          echo "$SSH_PRIVATE_KEY" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          # Export Terraform variables (using multiline delimiter for private key)
+          {
+            echo 'TF_VAR_private_key<<TFKEYEOF'
+            echo "$SSH_PRIVATE_KEY"
+            echo 'TFKEYEOF'
+          } >> $GITHUB_ENV
+          
           echo "TF_VAR_region=${{ env.AWS_REGION }}" >> $GITHUB_ENV
           echo "TF_VAR_domain_name=${DOMAIN_NAME}" >> $GITHUB_ENV
           echo "TF_VAR_email=${EMAIL}" >> $GITHUB_ENV
@@ -130,34 +133,55 @@ jobs:
       - name: Get Terraform Outputs
         id: tf_outputs
         working-directory: terraform
-        if: github.event.inputs.action != 'destroy'
+        if: github.event.inputs.action != 'destroy' && (github.event.inputs.action == 'apply' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
         run: |
-          echo "web_server_ip=$(terraform output -raw web_server_public_ip 2>/dev/null || echo 'N/A')" >> $GITHUB_OUTPUT
-          echo "reverse_proxy_ip=$(terraform output -raw reverse_proxy_public_ip 2>/dev/null || echo 'N/A')" >> $GITHUB_OUTPUT
-          echo "WEB_IP=$(terraform output -raw web_server_public_ip 2>/dev/null || echo '')" >> $GITHUB_ENV
-          echo "PROXY_IP=$(terraform output -raw reverse_proxy_public_ip 2>/dev/null || echo '')" >> $GITHUB_ENV
+          set +e
+          WEB_IP=$(terraform output -raw web_server_public_ip 2>&1)
+          PROXY_IP=$(terraform output -raw reverse_proxy_public_ip 2>&1)
+          
+          if [[ "$WEB_IP" == *"No outputs found"* ]] || [[ -z "$WEB_IP" ]]; then
+            WEB_IP="N/A"
+          fi
+          if [[ "$PROXY_IP" == *"No outputs found"* ]] || [[ -z "$PROXY_IP" ]]; then
+            PROXY_IP="N/A"
+          fi
+          
+          echo "web_server_ip=${WEB_IP}" >> $GITHUB_OUTPUT
+          echo "reverse_proxy_ip=${PROXY_IP}" >> $GITHUB_OUTPUT
+          echo "WEB_IP=${WEB_IP}" >> $GITHUB_ENV
+          echo "PROXY_IP=${PROXY_IP}" >> $GITHUB_ENV
+          set -e
 
       # 1️⃣4️⃣ Display Infrastructure Info
       - name: Display Infrastructure Info
-        if: github.event.inputs.action != 'destroy'
+        if: github.event.inputs.action != 'destroy' && (github.event.inputs.action == 'apply' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
         run: |
+          WEB_IP="${{ steps.tf_outputs.outputs.web_server_ip }}"
+          PROXY_IP="${{ steps.tf_outputs.outputs.reverse_proxy_ip }}"
+          
           echo "## 🚀 Infrastructure Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Web Server" >> $GITHUB_STEP_SUMMARY
-          echo "- **Public IP:** \`${{ steps.tf_outputs.outputs.web_server_ip }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Public IP:** \`${WEB_IP}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Reverse Proxy" >> $GITHUB_STEP_SUMMARY
-          echo "- **Public IP:** \`${{ steps.tf_outputs.outputs.reverse_proxy_ip }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Public IP:** \`${PROXY_IP}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### ⚠️ Next Steps" >> $GITHUB_STEP_SUMMARY
-          echo "1. Update DNS A record for \`${{ secrets.DOMAIN_NAME || 'mypodsix.online' }}\` to point to \`${{ steps.tf_outputs.outputs.reverse_proxy_ip }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "2. Wait for DNS propagation (usually 5-15 minutes)" >> $GITHUB_STEP_SUMMARY
-          echo "3. The reverse proxy will automatically obtain SSL certificate once DNS is ready" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📝 Access Information" >> $GITHUB_STEP_SUMMARY
-          echo "- Web Server: http://${{ steps.tf_outputs.outputs.web_server_ip }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Reverse Proxy: http://${{ steps.tf_outputs.outputs.reverse_proxy_ip }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Domain (after DNS): http://${{ secrets.DOMAIN_NAME || 'mypodsix.online' }}" >> $GITHUB_STEP_SUMMARY
+          if [[ "${PROXY_IP}" != "N/A" ]]; then
+            echo "### ⚠️ Next Steps" >> $GITHUB_STEP_SUMMARY
+            echo "1. Update DNS A record for \`${{ secrets.DOMAIN_NAME || 'mypodsix.online' }}\` to point to \`${PROXY_IP}\`" >> $GITHUB_STEP_SUMMARY
+            echo "2. Wait for DNS propagation (usually 5-15 minutes)" >> $GITHUB_STEP_SUMMARY
+            echo "3. The reverse proxy will automatically obtain SSL certificate once DNS is ready" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 📝 Access Information" >> $GITHUB_STEP_SUMMARY
+            if [[ "${WEB_IP}" != "N/A" ]]; then
+              echo "- Web Server: http://${WEB_IP}" >> $GITHUB_STEP_SUMMARY
+            fi
+            if [[ "${PROXY_IP}" != "N/A" ]]; then
+              echo "- Reverse Proxy: http://${PROXY_IP}" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "- Domain (after DNS): http://${{ secrets.DOMAIN_NAME || 'mypodsix.online' }}" >> $GITHUB_STEP_SUMMARY
+          fi
 
   verify-deployment:
     name: Verify Deployment
@@ -190,11 +214,23 @@ jobs:
           TF_VAR_key_name: ${{ secrets.KEY_NAME || 'stagging-key' }}
           TF_VAR_ssh_allowed_cidr: ${{ secrets.SSH_ALLOWED_CIDR || '0.0.0.0/0' }}
         run: |
+          set +e
           terraform init
-          WEB_IP=$(terraform output -raw web_server_public_ip 2>/dev/null || echo '')
-          PROXY_IP=$(terraform output -raw reverse_proxy_public_ip 2>/dev/null || echo '')
+          WEB_IP=$(terraform output -raw web_server_public_ip 2>&1)
+          PROXY_IP=$(terraform output -raw reverse_proxy_public_ip 2>&1)
+          
+          if [[ "$WEB_IP" == *"No outputs found"* ]] || [[ -z "$WEB_IP" ]] || [[ "$WEB_IP" == *"Error"* ]]; then
+            WEB_IP=""
+            echo "⚠️ Warning: Could not retrieve web_server_public_ip"
+          fi
+          if [[ "$PROXY_IP" == *"No outputs found"* ]] || [[ -z "$PROXY_IP" ]] || [[ "$PROXY_IP" == *"Error"* ]]; then
+            PROXY_IP=""
+            echo "⚠️ Warning: Could not retrieve reverse_proxy_public_ip"
+          fi
+          
           echo "WEB_IP=${WEB_IP}" >> $GITHUB_ENV
           echo "PROXY_IP=${PROXY_IP}" >> $GITHUB_ENV
+          set -e
 
       - name: Wait for EC2 instances to be ready
         run: |
@@ -203,24 +239,28 @@ jobs:
 
       - name: Verify Web Server HTTP
         run: |
-          if [ -n "${{ env.WEB_IP }}" ]; then
-            echo "Testing web server at http://${{ env.WEB_IP }}..."
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://${{ env.WEB_IP }}" || echo "000")
+          if [ -n "${WEB_IP}" ] && [ "${WEB_IP}" != "" ]; then
+            echo "Testing web server at http://${WEB_IP}..."
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://${WEB_IP}" || echo "000")
             if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
               echo "✅ Web server is responding with HTTP $HTTP_CODE"
             else
               echo "⚠️ Web server returned HTTP $HTTP_CODE (may still be initializing)"
             fi
+          else
+            echo "⏭️ Skipping web server verification - IP not available"
           fi
 
       - name: Verify Reverse Proxy HTTP
         run: |
-          if [ -n "${{ env.PROXY_IP }}" ]; then
-            echo "Testing reverse proxy at http://${{ env.PROXY_IP }}..."
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://${{ env.PROXY_IP }}" || echo "000")
+          if [ -n "${PROXY_IP}" ] && [ "${PROXY_IP}" != "" ]; then
+            echo "Testing reverse proxy at http://${PROXY_IP}..."
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://${PROXY_IP}" || echo "000")
             if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
               echo "✅ Reverse proxy is responding with HTTP $HTTP_CODE"
             else
               echo "⚠️ Reverse proxy returned HTTP $HTTP_CODE (may still be initializing)"
             fi
+          else
+            echo "⏭️ Skipping reverse proxy verification - IP not available"
           fi
