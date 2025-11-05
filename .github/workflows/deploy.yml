@@ -126,7 +126,7 @@ jobs:
       # 1️⃣2️⃣ Terraform Destroy
       - name: Terraform Destroy
         working-directory: terraform
-        if: github.event.inputs.action == 'destroy'
+        #if: github.event.inputs.action == 'destroy'
         run: terraform destroy -auto-approve
 
      
