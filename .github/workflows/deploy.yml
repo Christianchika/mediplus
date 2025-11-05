@@ -79,9 +79,9 @@ jobs:
           echo "TF_VAR_ssh_allowed_cidr=${SSH_ALLOWED_CIDR}" >> $GITHUB_ENV
 
       # 5️⃣ Terraform Init
-      #- name: Terraform Init
-        #working-directory: terraform
-        #run: terraform init
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init
 
       # 6️⃣ Terraform Format Check
       #- name: Terraform Format Check
